@@ -1,9 +1,5 @@
-Please refer to the Serde website under [**Writing a data format**] for a
-discussion of this example code.
-
-[**Writing a data format**]: https://serde.rs/data-format.html
-
-<br>
+#### Work in progress
+I've only implemented serilaizers for the few types I needed. If you're interested in becoming the maintainer of this crate please reach out!
 
 #### License
 
