@@ -1,17 +1,16 @@
+use crate::constants::WORD_SIZE;
 use sha3::{Digest, Keccak256};
 
-pub fn pad_right(mut value: Vec<u8>, byte_size: usize) -> Vec<u8> {
-    let padding = byte_size - value.len() % byte_size;
-    value.resize(value.len() + padding, 0);
-    value
+pub fn pad_right(bytes: &[u8]) -> Vec<u8> {
+    let padding_length = WORD_SIZE - bytes.len() % WORD_SIZE;
+    let padding = vec![0u8; padding_length];
+    [bytes, &padding[..]].concat()
 }
 
-pub fn _pad_left(value: Vec<u8>, byte_size: usize) -> Vec<u8> {
-    let padding = byte_size - value.len() % byte_size;
-    let mut new_vec = vec![0; padding];
-
-    new_vec.splice(new_vec.len()..new_vec.len(), value.iter().cloned());
-    new_vec
+pub fn pad_left(bytes: &[u8]) -> Vec<u8> {
+    let padding_length = WORD_SIZE - bytes.len() % WORD_SIZE;
+    let padding = vec![0u8; padding_length];
+    [&padding[..], bytes].concat()
 }
 
 pub fn keccak256(bytes: Vec<u8>) -> Vec<u8> {

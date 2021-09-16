@@ -1,7 +1,7 @@
 use crate::{
+    constants::WORD_SIZE,
     error::{Error, Result},
-    helpers::pad_right,
-    types::U256,
+    helpers::{pad_left, pad_right},
 };
 use serde::ser::{self, Serialize};
 
@@ -10,9 +10,20 @@ pub enum Value {
     DynamicType(Vec<u8>),
 }
 pub struct Serializer {
-    output: Vec<u8>,
-    dynamic_types_output: Vec<u8>,
-    dynamic_outputs: Vec<Value>,
+    packed: bool,
+    outputs: Vec<Value>,
+}
+
+pub fn to_vec<T>(value: &T) -> Result<Vec<u8>>
+where
+    T: Serialize,
+{
+    let mut serializer = Serializer {
+        packed: false,
+        outputs: vec![],
+    };
+    value.serialize(&mut serializer)?;
+    collect_output(serializer)
 }
 
 pub fn to_vec_packed<T>(value: &T) -> Result<Vec<u8>>
@@ -20,31 +31,28 @@ where
     T: Serialize,
 {
     let mut serializer = Serializer {
-        output: vec![],
-        dynamic_types_output: vec![],
-        dynamic_outputs: vec![],
+        packed: true,
+        outputs: vec![],
     };
     value.serialize(&mut serializer)?;
+    collect_output(serializer)
+}
+
+fn collect_output(serializer: Serializer) -> Result<Vec<u8>> {
     let mut output: Vec<u8> = vec![];
     let mut dynamic_types_output: Vec<u8> = vec![];
-    for value in &serializer.dynamic_outputs {
+    for value in &serializer.outputs {
         match value {
             Value::StaticType(bytes) => {
                 output.extend(bytes);
             }
             Value::DynamicType(bytes) => {
-                let mut index = ((serializer.dynamic_outputs.len() * 32
-                    + dynamic_types_output.len()) as u64)
-                    .to_le_bytes()
-                    .to_vec();
-                index.resize(32, 0);
-                index.reverse();
-                output.extend(index);
+                let index =
+                    (serializer.outputs.len() * WORD_SIZE + dynamic_types_output.len()) as u64;
+                output.extend(to_vec(&index)?);
 
-                let mut len_bytes = bytes.len().to_le_bytes().to_vec();
-                len_bytes.resize(32, 0);
-                len_bytes.reverse();
-                dynamic_types_output.extend([len_bytes, pad_right(bytes.to_vec(), 32)].concat());
+                dynamic_types_output
+                    .extend([to_vec(&bytes.len())?, pad_right(&bytes.to_vec())].concat());
             }
         }
     }
@@ -75,7 +83,13 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self.serialize_i64(i64::from(v))
     }
 
-    fn serialize_i64(self, _v: i64) -> Result<()> {
+    fn serialize_i64(self, v: i64) -> Result<()> {
+        let bytes = if self.packed {
+            v.to_be_bytes().to_vec()
+        } else {
+            pad_left(&v.to_be_bytes())
+        };
+        self.outputs.push(Value::StaticType(bytes));
         Ok(())
     }
 
@@ -92,10 +106,12 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_u64(self, v: u64) -> Result<()> {
-        let mut bytes = v.to_le_bytes().to_vec();
-        bytes.resize(8, 0);
-        bytes.reverse();
-        self.dynamic_outputs.push(Value::StaticType(bytes.to_vec()));
+        let bytes = if self.packed {
+            v.to_be_bytes().to_vec()
+        } else {
+            pad_left(&v.to_be_bytes())
+        };
+        self.outputs.push(Value::StaticType(bytes));
         Ok(())
     }
 
@@ -112,21 +128,14 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_str(self, v: &str) -> Result<()> {
-        let dynamic_types_output_index = self.output.len() + 32;
         let bytes = v.as_bytes().to_vec();
-        self.dynamic_outputs.push(Value::DynamicType(bytes.clone()));
-        let mut len_bytes = bytes.len().to_le_bytes().to_vec();
-        len_bytes.resize(32, 0);
-        len_bytes.reverse();
-        self.dynamic_types_output
-            .extend([len_bytes, pad_right(bytes, 32)].concat());
-        U256::from(dynamic_types_output_index).serialize(self)?;
+        self.outputs.push(Value::DynamicType(bytes.clone()));
+
         Ok(())
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
-        self.dynamic_outputs.push(Value::StaticType(v.to_vec()));
-        self.output.extend(v);
+        self.outputs.push(Value::StaticType(v.to_vec()));
         Ok(())
     }
 
@@ -175,8 +184,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        let mut v = vec![1, 2, 3];
-        self.output.append(&mut v);
         Ok(())
     }
 
@@ -207,8 +214,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
-        let mut v = vec![1, 2, 3];
-        self.output.append(&mut v);
         Ok(self)
     }
 
@@ -350,8 +355,9 @@ impl<'a> ser::SerializeStructVariant for &'a mut Serializer {
 
 #[cfg(test)]
 mod tests {
-    use super::to_vec_packed;
+    use super::{to_vec, to_vec_packed};
     use crate::{types::U256, Bytes32};
+    use hex_literal::hex;
     use num_bigint::BigUint;
 
     #[test]
@@ -359,26 +365,28 @@ mod tests {
         for (input, output) in [
             (
                 256,
-                "0000000000000000000000000000000000000000000000000000000000000100",
+                hex!("0000000000000000000000000000000000000000000000000000000000000100"),
             ),
             (
                 123456_u64,
-                "000000000000000000000000000000000000000000000000000000000001e240",
+                hex!("000000000000000000000000000000000000000000000000000000000001e240"),
             ),
         ]
         .iter()
         {
-            assert_eq!(
-                to_vec_packed(&U256(BigUint::from(*input))).unwrap(),
-                hex::decode(output).unwrap()
-            );
+            assert_eq!(to_vec(&U256(BigUint::from(*input))).unwrap(), output);
         }
     }
 
     #[test]
     fn test_tuple() {
-        for (input, output) in [((1u64), "0000000000000001")].iter() {
-            assert_eq!(to_vec_packed(&input).unwrap(), hex::decode(output).unwrap());
+        for (input, output) in [(
+            (1u64),
+            hex!("0000000000000000000000000000000000000000000000000000000000000001"),
+        )]
+        .iter()
+        {
+            assert_eq!(to_vec(&input).unwrap(), output);
         }
     }
 
@@ -386,11 +394,11 @@ mod tests {
     fn test_bytes32() {
         for (input, output) in [(
             Bytes32([0; 32]),
-            "0000000000000000000000000000000000000000000000000000000000000000",
+            hex!("0000000000000000000000000000000000000000000000000000000000000000"),
         )]
         .iter()
         {
-            assert_eq!(to_vec_packed(&input).unwrap(), hex::decode(output).unwrap());
+            assert_eq!(to_vec(&input).unwrap(), output);
         }
     }
 
@@ -398,11 +406,48 @@ mod tests {
     fn test_big_int() {
         for (input, output) in [(
             U256(BigUint::from(10000u64) * BigUint::from(10u64).pow(14)),
-            "0000000000000000000000000000000000000000000000000DE0B6B3A7640000",
+            hex!("0000000000000000000000000000000000000000000000000DE0B6B3A7640000"),
         )]
         .iter()
         {
-            assert_eq!(to_vec_packed(&input).unwrap(), hex::decode(output).unwrap());
+            assert_eq!(to_vec(&input).unwrap(), output);
+        }
+    }
+
+    #[test]
+    fn test_i64() {
+        for (input, output) in [(
+            1i64,
+            hex!("0000000000000000000000000000000000000000000000000000000000000001"),
+        )]
+        .iter()
+        {
+            assert_eq!(to_vec(&input).unwrap(), output);
+        }
+    }
+
+    #[test]
+    fn test_i64_packed() {
+        for (input, output) in [(1i64, hex!("0000000000000001"))].iter() {
+            assert_eq!(to_vec_packed(&input).unwrap(), output);
+        }
+    }
+
+    #[test]
+    fn test_string() {
+        for (input, output) in [(
+            "gavofyork",
+            hex!(
+                "
+  0000000000000000000000000000000000000000000000000000000000000020
+  0000000000000000000000000000000000000000000000000000000000000009
+  6761766f66796f726b0000000000000000000000000000000000000000000000
+            "
+            ),
+        )]
+        .iter()
+        {
+            assert_eq!(to_vec(&input).unwrap(), output);
         }
     }
 }

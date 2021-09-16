@@ -1,3 +1,4 @@
+use crate::helpers::pad_left;
 use num_bigint::BigUint;
 use serde::Serialize;
 
@@ -57,7 +58,7 @@ impl Serialize for Address {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_bytes(&self.0.to_vec())
+        serializer.serialize_bytes(&pad_left(&self.0.to_vec()))
     }
 }
 
